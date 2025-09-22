@@ -1,0 +1,21 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Build artifacts
+dist/
+build/
+
+# Env & creds
+.env
+*.env
+proxy/.env
+extension/.env
+*.pem
+*.key
+*.crt
+
+# Editor
+.vscode/
+.DS_Store

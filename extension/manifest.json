@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Button Buddy (MVP)",
+  "version": "0.1.0",
+  "description": "Ask what to click next. I’ll read the page and point the way.",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": ["<all_urls>"],
+  "action": {
+    "default_title": "Button Buddy",
+    "default_popup": "popup.html"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
