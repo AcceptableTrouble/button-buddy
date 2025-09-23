@@ -14,8 +14,23 @@ function setResult(obj) {
 
 function setLoading(isLoading) {
   const btn = document.getElementById('askBtn');
-  if (isLoading) btn.classList.add('loading');
-  else btn.classList.remove('loading');
+  const nextBtn = document.getElementById('nextBtn');
+  if (isLoading) {
+    btn.classList.add('loading');
+    btn.disabled = true;
+    if (nextBtn) {
+      // remember previous disabled state to restore accurately
+      nextBtn.dataset.prevDisabled = String(nextBtn.disabled);
+      nextBtn.disabled = true;
+    }
+  } else {
+    btn.classList.remove('loading');
+    btn.disabled = false;
+    if (nextBtn && 'prevDisabled' in nextBtn.dataset) {
+      nextBtn.disabled = nextBtn.dataset.prevDisabled === 'true';
+      delete nextBtn.dataset.prevDisabled;
+    }
+  }
 }
 
 async function ensureInjected(tabId) {
@@ -71,6 +86,15 @@ function updateSessionUI(g) {
   }
 }
 
+// ---- Last query storage helpers ----
+async function loadLastQuery() {
+  const res = await chrome.storage.local.get('lastQuery');
+  return res.lastQuery || '';
+}
+async function saveLastQuery(query) {
+  await chrome.storage.local.set({ lastQuery: query || '' });
+}
+
 // include history when asking the model
 async function askLLM(query, page, history) {
   const res = await fetch('http://localhost:8787/ask', {
@@ -84,21 +108,35 @@ async function askLLM(query, page, history) {
 
 document.addEventListener('DOMContentLoaded', async () => {
   const qEl = document.getElementById('query');
+  const askBtn = document.getElementById('askBtn');
 
   // load existing session state (if any)
   const initial = await loadGuidance();
   updateSessionUI(initial);
 
+  // restore last query if any
+  try {
+    const last = await loadLastQuery();
+    if (last) qEl.value = last;
+  } catch {}
+
+  // persist query on input
+  qEl.addEventListener('input', () => { saveLastQuery(qEl.value); });
+
   document.querySelectorAll('.preset').forEach(btn => {
-    btn.addEventListener('click', () => { qEl.value = btn.dataset.q; });
+    btn.addEventListener('click', () => {
+      qEl.value = btn.dataset.q;
+      saveLastQuery(qEl.value);
+    });
   });
 
-  // ASK (start or continue guidance)
-  document.getElementById('askBtn').addEventListener('click', async () => {
+  // common handler used by Ask button and Cmd/Ctrl+Enter
+  async function performAsk() {
     setStatus('Scanning page…');
     setResult('');
     setLoading(true);
     const query = qEl.value.trim() || 'Find account settings';
+    saveLastQuery(query);
 
     try {
       const tabId = await getActiveTabId();
@@ -132,6 +170,17 @@ document.addEventListener('DOMContentLoaded', async () => {
       setResult(String(err));
     } finally {
       setLoading(false);
+    }
+  }
+
+  // ASK (start or continue guidance)
+  askBtn.addEventListener('click', performAsk);
+
+  // Cmd/Ctrl + Enter triggers Ask
+  qEl.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault();
+      if (!askBtn.disabled) performAsk();
     }
   });
 
