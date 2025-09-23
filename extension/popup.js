@@ -124,6 +124,44 @@ async function askLLM(query, page, history) {
   return await res.json();
 }
 
+// ---- Client-side heuristic: direct keyword match on page elements ----
+function findLocalDirectMatch(query, page) {
+  try {
+    const elements = Array.isArray(page?.elements) ? page.elements : [];
+    const rawWords = String(query || '')
+      .toLowerCase()
+      .split(/[^\p{L}\p{N}]+/u)
+      .filter(w => w && w.length >= 3);
+    if (!elements.length || !rawWords.length) return null;
+
+    let best = null;
+    for (const el of elements) {
+      const text = `${el?.text || ''} ${el?.ariaLabel || ''}`.toLowerCase();
+      if (!text.trim()) continue;
+      let score = 0;
+      for (const w of rawWords) {
+        if (text.includes(w)) score += 1;
+      }
+      if (score > 0) {
+        if (!best || score > best.score) {
+          best = { el, score };
+        }
+      }
+    }
+
+    if (!best) return null;
+    const label = (best.el.text || best.el.ariaLabel || '').trim() || 'Open';
+    return {
+      action_label: label,
+      selector: best.el.selector || null,
+      confidence: 1.0,
+      explanation: 'Direct match found locally.'
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
   const qEl = document.getElementById('query');
   const askBtn = document.getElementById('askBtn');
@@ -170,10 +208,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       await ensureInjected(tabId);
       const page = await scrapePage(tabId);
 
-      setStatus('Thinking…');
-      const g0 = await loadGuidance();
-      const history = g0?.steps?.slice(-3) || []; // send last 3 steps if any
-      const answer = await askLLM(query, page, history);
+      // Try local heuristic first
+      let answer = findLocalDirectMatch(query, page);
+      if (!answer) {
+        setStatus('Thinking…');
+        const g0 = await loadGuidance();
+        const history = g0?.steps?.slice(-3) || []; // send last 3 steps if any
+        answer = await askLLM(query, page, history);
+      }
 
       setStatus('');
       setResult(answer);
@@ -183,6 +225,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       // create/update guidance session
+      const g0 = await loadGuidance();
       let g = g0 || { goal: query, steps: [], lastUrl: page.url };
       if (!g.goal) g.goal = query;
       g.steps.push({ url: page.url, action_label: answer.action_label, selector: answer.selector, t: Date.now() });
@@ -227,7 +270,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       const g = await loadGuidance();
       if (!g) throw new Error('No active guidance session. Ask a goal first.');
 
-      const answer = await askLLM(g.goal, page, g.steps.slice(-3));
+      // Try local heuristic first using the goal as query
+      let answer = findLocalDirectMatch(g.goal, page);
+      if (!answer) {
+        setStatus('Thinking…');
+        answer = await askLLM(g.goal, page, g.steps.slice(-3));
+      }
       setStatus('');
       setResult(answer);
 
