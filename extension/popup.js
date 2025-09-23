@@ -73,14 +73,17 @@ async function resetGuidance() {
 }
 function updateSessionUI(g) {
   const el = document.getElementById('goalLine');
+  const usageEl = document.getElementById('usageLine');
   const nextBtn = document.getElementById('nextBtn');
   const resetBtn = document.getElementById('resetBtn');
   if (!g) {
     el.textContent = 'No active guidance.';
+    if (usageEl) usageEl.textContent = 'Uses this session: 0';
     nextBtn.disabled = true;
     resetBtn.disabled = true;
   } else {
     el.textContent = `Goal: ${g.goal} • Steps: ${g.steps.length}`;
+    if (usageEl) usageEl.textContent = `Uses this session: ${g.usageCount ?? 0}`;
     nextBtn.disabled = false;
     resetBtn.disabled = false;
   }
@@ -93,6 +96,21 @@ async function loadLastQuery() {
 }
 async function saveLastQuery(query) {
   await chrome.storage.local.set({ lastQuery: query || '' });
+}
+
+// ---- Usage counter helpers ----
+async function loadUsageCount() {
+  const res = await chrome.storage.local.get('usageCount');
+  return typeof res.usageCount === 'number' ? res.usageCount : 0;
+}
+async function saveUsageCount(count) {
+  await chrome.storage.local.set({ usageCount: count });
+}
+async function incrementUsageCount() {
+  const n = await loadUsageCount();
+  const next = n + 1;
+  await saveUsageCount(next);
+  return next;
 }
 
 // include history when asking the model
@@ -113,6 +131,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   // load existing session state (if any)
   const initial = await loadGuidance();
   updateSessionUI(initial);
+
+  // initialize usage line from stored counter
+  try {
+    const usage = await loadUsageCount();
+    const usageEl = document.getElementById('usageLine');
+    if (usageEl) usageEl.textContent = `Uses this session: ${usage}`;
+  } catch {}
 
   // restore last query if any
   try {
@@ -162,6 +187,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (!g.goal) g.goal = query;
       g.steps.push({ url: page.url, action_label: answer.action_label, selector: answer.selector, t: Date.now() });
       g.lastUrl = page.url;
+      // increment usage count on successful suggestion
+      const usage = await incrementUsageCount();
+      g.usageCount = usage;
       await saveGuidance(g);
       updateSessionUI(g);
 
@@ -209,6 +237,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       g.steps.push({ url: page.url, action_label: answer.action_label, selector: answer.selector, t: Date.now() });
       g.lastUrl = page.url;
+      // increment usage count on successful next suggestion
+      const usage = await incrementUsageCount();
+      g.usageCount = usage;
       await saveGuidance(g);
       updateSessionUI(g);
     } catch (err) {
