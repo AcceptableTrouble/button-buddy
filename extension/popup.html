@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Button Bud</title>
+  <title>Button Buddy</title>
   <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
@@ -22,7 +22,10 @@
     <textarea id="query" rows="3" placeholder="e.g., Cancel my subscription"></textarea>
 
     <div class="controls">
-      <button id="askBtn">Scan page &amp; suggest</button>
+      <button id="askBtn">
+        <span class="btnLabel">Scan page &amp; suggest</span>
+        <span class="spinner" aria-hidden="true"></span>
+      </button>
       <label class="hl">
         <input type="checkbox" id="highlightToggle" checked />
         Highlight suggestion
@@ -31,6 +34,15 @@
 
     <div id="status"></div>
     <pre id="result"></pre>
+
+    <!-- New session UI block -->
+    <section class="session">
+      <div id="goalLine">No active guidance.</div>
+      <div class="sessionBtns">
+        <button id="nextBtn" disabled>Next step</button>
+        <button id="resetBtn" disabled>Reset</button>
+      </div>
+    </section>
   </main>
 
   <footer>
