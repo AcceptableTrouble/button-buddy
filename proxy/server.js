@@ -34,9 +34,10 @@ function buildPrompt(query, page, history) {
 
 Rules you must follow:
 - Only pick from the given elements array; never fabricate new labels or selectors.
-- Output the element's exact selector. If multiple look relevant, prefer the most specific, visible option.
+- Output the element's exact selector. If multiple look relevant, prefer the most specific, visible option over generic entries like “Change”.
 - Use the element's visible text (or aria-label) verbatim for "action_label". Keep explanations in English but reference the real label even if the page uses another language.
 - Infer the page language from title, lang attribute, and visible text to disambiguate meanings.
+- When the goal targets a specific concept (e.g., email), strongly prefer labels that mention that concept or a clear parent path (Profile/Account/Settings → Email) instead of vague labels.
 - If you are not fully confident, cap confidence at 0.55 and include a cautious explanation that clearly states the uncertainty (e.g., "Not fully certain; ...").
 - If nothing is a good fit, choose the closest helpful element with low confidence rather than inventing anything.
 
@@ -91,6 +92,23 @@ Current page summary:
     {
       role: 'assistant',
       content: `{"action_label":"Fakturering","selector":"#fakturering","confidence":0.92,"explanation":"Invoices live under Billing/Fakturering."}`
+    },
+    {
+      role: 'user',
+      content:
+`User goal: Change my email
+Prior steps: []
+Current page summary:
+{"url":"https://app.example.com/settings","title":"Account Settings","elements":[
+  {"role":"button","text":"Change","selector":"#change"},
+  {"role":"link","text":"Change password","selector":"#change-password"},
+  {"role":"link","text":"Email settings","selector":"#email-settings"},
+  {"role":"link","text":"Profile","selector":"#profile"},
+  {"role":"link","text":"Settings","selector":"#settings"}]}`
+    },
+    {
+      role: 'assistant',
+      content: `{"action_label":"Email settings","selector":"#email-settings","confidence":0.93,"explanation":"Email settings is the most direct path for updating email."}`
     },
     {
       role: 'user',

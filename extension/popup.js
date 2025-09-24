@@ -49,6 +49,8 @@ async function scrapePage(tabId) {
   });
 }
 
+const USE_LOCAL_FASTPATH = false;
+
 // highlight now also passes the label text and enforces selector validation
 async function highlight(tabId, selector, label, opts = {}) {
   return new Promise((resolve) => {
@@ -164,7 +166,7 @@ function sanitizeCandidate(candidate, selectorMap, source) {
     selector,
     confidence: clampConfidence(Number(candidate.confidence ?? 0.6)),
     explanation,
-    source: source || candidate.source || 'model'
+    source: source || candidate.source || 'llm'
   };
 }
 
@@ -181,14 +183,19 @@ async function prepareFinalSuggestion({ tabId, page, query, candidate, source })
     status: ''
   };
 
+  let originalValid = false;
+  let originalLowConfidence = false;
   if (original) {
-    const stillValid = await validateSelector(tabId, original.selector);
-    if (stillValid) {
+    originalValid = await validateSelector(tabId, original.selector);
+    originalLowConfidence = original.confidence <= 0.55;
+    if (originalValid && !originalLowConfidence) {
       response.primary = original;
       response.status = original.explanation || '';
       return response;
     }
-    response.status = 'Original suggestion no longer resolves on the page.';
+    response.status = originalValid
+      ? 'Not fully certain; offering alternates for a safer choice.'
+      : 'Original suggestion no longer resolves on the page.';
   } else {
     response.status = 'Model did not return a selectable element.';
   }
@@ -209,6 +216,14 @@ async function prepareFinalSuggestion({ tabId, page, query, candidate, source })
       response.status = 'No matching elements found. Please refine your request.';
       return response;
     }
+    if (originalValid) {
+      response.primary = {
+        ...original,
+        confidence: clampConfidence(Math.min(original.confidence, 0.55)),
+        explanation: 'Not fully certain; no better matches found on this page.'
+      };
+      return response;
+    }
     response.primary = {
       ...original,
       selector: null,
@@ -218,15 +233,21 @@ async function prepareFinalSuggestion({ tabId, page, query, candidate, source })
     return response;
   }
 
-  response.alternates = validatedAlternates;
+  const [firstAlt] = validatedAlternates;
+  response.alternates = validatedAlternates.slice(0, 3);
+
   const primary = {
-    ...validatedAlternates[0],
-    confidence: clampConfidence(Math.min(validatedAlternates[0].confidence, 0.55)),
-    explanation: 'Not fully certain; primary suggestion missing, using the closest alternate.'
+    ...firstAlt,
+    confidence: clampConfidence(Math.min(firstAlt.confidence, 0.55)),
+    explanation: originalValid
+      ? 'Not fully certain; using the closest alternate instead.'
+      : 'Primary suggestion unavailable; this alternate should be the closest match.'
   };
   response.primary = primary;
   response.usedAlternate = true;
-  response.status = 'Not fully certain; primary suggestion unavailable. Showing alternates.';
+  response.status = originalValid
+    ? 'Not fully certain; choosing a safer alternate.'
+    : 'Primary suggestion unavailable; showing alternates.';
   return response;
 }
 
@@ -296,6 +317,7 @@ async function askLLM(query, page, history) {
 
 // ---- Client-side heuristic: direct keyword match on page elements ----
 function findLocalDirectMatch(query, page) {
+  if (!USE_LOCAL_FASTPATH) return null;
   try {
     const elements = Array.isArray(page?.elements) ? page.elements : [];
     const scored = computeElementScores(query, elements);
@@ -362,15 +384,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       const existingGuidance = await loadGuidance();
 
-      // Try local heuristic first
-      let answerSource = 'local';
-      let answer = findLocalDirectMatch(query, page);
-      if (!answer) {
-        setStatus('Thinking…');
-        const history = existingGuidance?.steps?.slice(-3) || [];
-        answer = await askLLM(query, page, history);
-        answerSource = 'model';
-      }
+      setStatus('Thinking…');
+      const history = existingGuidance?.steps?.slice(-3) || [];
+      const answer = await askLLM(query, page, history);
+      const answerSource = 'llm';
 
       const prepared = await prepareFinalSuggestion({ tabId, page, query, candidate: answer, source: answerSource });
       const statusMsg = prepared.status || (prepared.primary?.explanation ?? '');
@@ -440,14 +457,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       const g = await loadGuidance();
       if (!g) throw new Error('No active guidance session. Ask a goal first.');
 
-      // Try local heuristic first using the goal as query
-      let answerSource = 'local';
-      let answer = findLocalDirectMatch(g.goal, page);
-      if (!answer) {
-        setStatus('Thinking…');
-        answer = await askLLM(g.goal, page, g.steps.slice(-3));
-        answerSource = 'model';
-      }
+      setStatus('Thinking…');
+      const answer = await askLLM(g.goal, page, g.steps.slice(-3));
+      const answerSource = 'llm';
 
       const prepared = await prepareFinalSuggestion({ tabId, page, query: g.goal, candidate: answer, source: answerSource });
       const statusMsg = prepared.status || (prepared.primary?.explanation ?? '');
@@ -493,4 +505,3 @@ document.addEventListener('DOMContentLoaded', async () => {
     setResult(''); setStatus('');
   });
 });
-
