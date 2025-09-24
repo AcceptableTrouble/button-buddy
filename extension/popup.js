@@ -49,15 +49,185 @@ async function scrapePage(tabId) {
   });
 }
 
-// highlight now also passes the label text
-async function highlight(tabId, selector, label) {
+// highlight now also passes the label text and enforces selector validation
+async function highlight(tabId, selector, label, opts = {}) {
   return new Promise((resolve) => {
     chrome.tabs.sendMessage(
       tabId,
-      { type: 'HIGHLIGHT', selector, label },
-      () => resolve()
+      { type: 'HIGHLIGHT', selector, label, strictSelector: Boolean(opts.strictSelector) },
+      (resp) => {
+        if (chrome.runtime.lastError) {
+          resolve(false);
+        } else {
+          resolve(Boolean(resp?.ok));
+        }
+      }
     );
   });
+}
+
+async function validateSelector(tabId, selector) {
+  if (!tabId || !selector) return false;
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(
+      tabId,
+      { type: 'VALIDATE_SELECTOR', selector },
+      (resp) => {
+        if (chrome.runtime.lastError) {
+          resolve(false);
+        } else {
+          resolve(Boolean(resp?.ok));
+        }
+      }
+    );
+  });
+}
+
+function tokenizeQuery(query) {
+  return String(query || '')
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(w => w && w.length >= 3);
+}
+
+function labelForElement(el) {
+  return (el?.text || el?.ariaLabel || el?.name || '').trim();
+}
+
+function clampConfidence(value) {
+  if (!Number.isFinite(value)) return 0;
+  if (value < 0) return 0;
+  if (value > 1) return 1;
+  return value;
+}
+
+function computeElementScores(query, elements) {
+  const tokens = tokenizeQuery(query);
+  if (!Array.isArray(elements) || !elements.length || !tokens.length) return [];
+  const scores = [];
+  for (const el of elements) {
+    if (!el || !el.selector) continue;
+    const label = `${el.text || ''} ${el.ariaLabel || ''} ${el.name || ''}`.toLowerCase();
+    const trimmed = label.trim();
+    if (!trimmed) continue;
+    let score = 0;
+    for (const token of tokens) {
+      if (!token) continue;
+      if (trimmed.includes(token)) {
+        score += token.length >= 6 ? 2 : 1;
+        if (trimmed.startsWith(token)) score += 0.5;
+      }
+    }
+    if (score > 0) {
+      scores.push({ el, score, label: labelForElement(el) });
+    }
+  }
+  scores.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    const aLen = a.label ? a.label.length : 0;
+    const bLen = b.label ? b.label.length : 0;
+    if (bLen !== aLen) return bLen - aLen; // prefer longer, more specific labels
+    return 0;
+  });
+  return scores;
+}
+
+function buildAlternateSuggestions(query, elements, excludeSelectors = new Set(), limit = 3) {
+  const scored = computeElementScores(query, elements);
+  const alternates = [];
+  for (const { el } of scored) {
+    if (excludeSelectors.has(el.selector)) continue;
+    const label = labelForElement(el) || 'Open';
+    alternates.push({
+      action_label: label,
+      selector: el.selector,
+      confidence: clampConfidence(0.5 - alternates.length * 0.05),
+      explanation: alternates.length === 0
+        ? 'Not fully certain; this seems closest on the current page.'
+        : 'Not fully certain; alternate option from current page.',
+      source: 'alternate'
+    });
+    if (alternates.length >= limit) break;
+  }
+  return alternates;
+}
+
+function sanitizeCandidate(candidate, selectorMap, source) {
+  if (!candidate || typeof candidate !== 'object') return null;
+  const selector = candidate.selector;
+  if (!selector || !selectorMap.has(selector)) return null;
+  const el = selectorMap.get(selector);
+  const label = labelForElement(el) || (candidate.action_label || '').trim() || 'Open';
+  const explanation = String(candidate.explanation || '').trim().slice(0, 160) || 'This element matches the goal.';
+  return {
+    action_label: label,
+    selector,
+    confidence: clampConfidence(Number(candidate.confidence ?? 0.6)),
+    explanation,
+    source: source || candidate.source || 'model'
+  };
+}
+
+async function prepareFinalSuggestion({ tabId, page, query, candidate, source }) {
+  const elements = Array.isArray(page?.elements) ? page.elements.filter(el => el && el.selector) : [];
+  const selectorMap = new Map(elements.map(el => [el.selector, el]));
+
+  const original = sanitizeCandidate(candidate, selectorMap, source);
+  const response = {
+    original,
+    primary: null,
+    alternates: [],
+    usedAlternate: false,
+    status: ''
+  };
+
+  if (original) {
+    const stillValid = await validateSelector(tabId, original.selector);
+    if (stillValid) {
+      response.primary = original;
+      response.status = original.explanation || '';
+      return response;
+    }
+    response.status = 'Original suggestion no longer resolves on the page.';
+  } else {
+    response.status = 'Model did not return a selectable element.';
+  }
+
+  const exclude = new Set();
+  if (original?.selector) exclude.add(original.selector);
+  const alternates = buildAlternateSuggestions(query, elements, exclude, 5);
+  const validatedAlternates = [];
+  for (const alt of alternates) {
+    const ok = await validateSelector(tabId, alt.selector);
+    if (ok) validatedAlternates.push(alt);
+    if (validatedAlternates.length >= 3) break;
+  }
+
+  if (!validatedAlternates.length) {
+    response.alternates = [];
+    if (!original) {
+      response.status = 'No matching elements found. Please refine your request.';
+      return response;
+    }
+    response.primary = {
+      ...original,
+      selector: null,
+      confidence: clampConfidence(Math.min(original.confidence, 0.5)),
+      explanation: 'Not fully certain; suggestion unavailable on the page right now.'
+    };
+    return response;
+  }
+
+  response.alternates = validatedAlternates;
+  const primary = {
+    ...validatedAlternates[0],
+    confidence: clampConfidence(Math.min(validatedAlternates[0].confidence, 0.55)),
+    explanation: 'Not fully certain; primary suggestion missing, using the closest alternate.'
+  };
+  response.primary = primary;
+  response.usedAlternate = true;
+  response.status = 'Not fully certain; primary suggestion unavailable. Showing alternates.';
+  return response;
 }
 
 // ---- Session storage helpers ----
@@ -128,33 +298,15 @@ async function askLLM(query, page, history) {
 function findLocalDirectMatch(query, page) {
   try {
     const elements = Array.isArray(page?.elements) ? page.elements : [];
-    const rawWords = String(query || '')
-      .toLowerCase()
-      .split(/[^\p{L}\p{N}]+/u)
-      .filter(w => w && w.length >= 3);
-    if (!elements.length || !rawWords.length) return null;
-
-    let best = null;
-    for (const el of elements) {
-      const text = `${el?.text || ''} ${el?.ariaLabel || ''}`.toLowerCase();
-      if (!text.trim()) continue;
-      let score = 0;
-      for (const w of rawWords) {
-        if (text.includes(w)) score += 1;
-      }
-      if (score > 0) {
-        if (!best || score > best.score) {
-          best = { el, score };
-        }
-      }
-    }
-
-    if (!best) return null;
-    const label = (best.el.text || best.el.ariaLabel || '').trim() || 'Open';
+    const scored = computeElementScores(query, elements);
+    if (!scored.length) return null;
+    const best = scored[0];
+    if (!best.el?.selector) return null;
+    const label = labelForElement(best.el) || 'Open';
     return {
       action_label: label,
-      selector: best.el.selector || null,
-      confidence: 1.0,
+      selector: best.el.selector,
+      confidence: 0.95,
       explanation: 'Direct match found locally.'
     };
   } catch (_) {
@@ -208,33 +360,51 @@ document.addEventListener('DOMContentLoaded', async () => {
       await ensureInjected(tabId);
       const page = await scrapePage(tabId);
 
+      const existingGuidance = await loadGuidance();
+
       // Try local heuristic first
+      let answerSource = 'local';
       let answer = findLocalDirectMatch(query, page);
       if (!answer) {
         setStatus('Thinking…');
-        const g0 = await loadGuidance();
-        const history = g0?.steps?.slice(-3) || []; // send last 3 steps if any
+        const history = existingGuidance?.steps?.slice(-3) || [];
         answer = await askLLM(query, page, history);
+        answerSource = 'model';
       }
 
-      setStatus('');
-      setResult(answer);
+      const prepared = await prepareFinalSuggestion({ tabId, page, query, candidate: answer, source: answerSource });
+      const statusMsg = prepared.status || (prepared.primary?.explanation ?? '');
+      setStatus(statusMsg);
+      setResult({
+        primary: prepared.primary,
+        alternates: prepared.alternates,
+        original: prepared.original
+      });
 
-      if (document.getElementById('highlightToggle').checked && answer.selector) {
-        await highlight(tabId, answer.selector, answer.action_label);
+      const shouldHighlight = document.getElementById('highlightToggle').checked && prepared.primary?.selector;
+      if (shouldHighlight) {
+        await highlight(tabId, prepared.primary.selector, prepared.primary.action_label, { strictSelector: true });
       }
 
-      // create/update guidance session
-      const g0 = await loadGuidance();
-      let g = g0 || { goal: query, steps: [], lastUrl: page.url };
-      if (!g.goal) g.goal = query;
-      g.steps.push({ url: page.url, action_label: answer.action_label, selector: answer.selector, t: Date.now() });
-      g.lastUrl = page.url;
-      // increment usage count on successful suggestion
-      const usage = await incrementUsageCount();
-      g.usageCount = usage;
-      await saveGuidance(g);
-      updateSessionUI(g);
+      if (prepared.primary) {
+        const guidance = existingGuidance || { goal: query, steps: [], lastUrl: page.url };
+        if (!guidance.goal) guidance.goal = query;
+        guidance.steps.push({
+          url: page.url,
+          action_label: prepared.primary.action_label,
+          selector: prepared.primary.selector,
+          confidence: prepared.primary.confidence,
+          source: prepared.primary.source,
+          t: Date.now()
+        });
+        guidance.lastUrl = page.url;
+
+        const usage = await incrementUsageCount();
+        guidance.usageCount = usage;
+
+        await saveGuidance(guidance);
+        updateSessionUI(guidance);
+      }
 
     } catch (err) {
       setStatus('Error');
@@ -271,25 +441,43 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (!g) throw new Error('No active guidance session. Ask a goal first.');
 
       // Try local heuristic first using the goal as query
+      let answerSource = 'local';
       let answer = findLocalDirectMatch(g.goal, page);
       if (!answer) {
         setStatus('Thinking…');
         answer = await askLLM(g.goal, page, g.steps.slice(-3));
-      }
-      setStatus('');
-      setResult(answer);
-
-      if (document.getElementById('highlightToggle').checked && answer.selector) {
-        await highlight(tabId, answer.selector, answer.action_label);
+        answerSource = 'model';
       }
 
-      g.steps.push({ url: page.url, action_label: answer.action_label, selector: answer.selector, t: Date.now() });
-      g.lastUrl = page.url;
-      // increment usage count on successful next suggestion
-      const usage = await incrementUsageCount();
-      g.usageCount = usage;
-      await saveGuidance(g);
-      updateSessionUI(g);
+      const prepared = await prepareFinalSuggestion({ tabId, page, query: g.goal, candidate: answer, source: answerSource });
+      const statusMsg = prepared.status || (prepared.primary?.explanation ?? '');
+      setStatus(statusMsg);
+      setResult({
+        primary: prepared.primary,
+        alternates: prepared.alternates,
+        original: prepared.original
+      });
+
+      const shouldHighlight = document.getElementById('highlightToggle').checked && prepared.primary?.selector;
+      if (shouldHighlight) {
+        await highlight(tabId, prepared.primary.selector, prepared.primary.action_label, { strictSelector: true });
+      }
+
+      if (prepared.primary) {
+        g.steps.push({
+          url: page.url,
+          action_label: prepared.primary.action_label,
+          selector: prepared.primary.selector,
+          confidence: prepared.primary.confidence,
+          source: prepared.primary.source,
+          t: Date.now()
+        });
+        g.lastUrl = page.url;
+        const usage = await incrementUsageCount();
+        g.usageCount = usage;
+        await saveGuidance(g);
+        updateSessionUI(g);
+      }
     } catch (err) {
       setStatus('Error');
       setResult(String(err));
@@ -305,3 +493,4 @@ document.addEventListener('DOMContentLoaded', async () => {
     setResult(''); setStatus('');
   });
 });
+

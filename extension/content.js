@@ -94,14 +94,26 @@
     } catch { return null; }
   }
 
-  function resolveTarget(selectorOrText) {
+  function resolveSelectorStrict(selector) {
+    if (!selector) return null;
+    try {
+      return document.querySelector(selector);
+    } catch {
+      return null;
+    }
+  }
+
+  function resolveTarget(selectorOrText, opts = {}) {
     if (!selectorOrText) return null;
+    const allowFuzzy = opts.allowFuzzy !== false;
 
     // 1) Try CSS selector
     try {
       const cssHit = document.querySelector(selectorOrText);
       if (cssHit) return cssHit;
     } catch {}
+
+    if (!allowFuzzy) return null;
 
     // 2) Try XPath if it looks like XPath or CSS failed
     if (selectorOrText.startsWith('/') || selectorOrText.startsWith('(')) {
@@ -172,12 +184,12 @@
     setTimeout(() => tip.remove(), 3500);
   }
 
-  function showOverlayAdvanced(selectorOrText, label) {
+  function showOverlayAdvanced(selectorOrText, label, opts = {}) {
     console.log('[ButtonBuddy] highlight called with:', selectorOrText, label);
-    const target = resolveTarget(selectorOrText);
+    const target = opts.strictSelector ? resolveSelectorStrict(selectorOrText) : resolveTarget(selectorOrText, { allowFuzzy: !opts.strictSelector });
     if (!target) {
       console.warn('[ButtonBuddy] No target resolved for:', selectorOrText);
-      return;
+      return false;
     }
     console.log('[ButtonBuddy] Target found:', target);
     scrollIntoViewCenter(target);
@@ -186,6 +198,7 @@
       outline(target);
       makeTooltip(target, label);
     }, 50);
+    return true;
   }
 
   // ---------- message bridge ----------
@@ -196,9 +209,15 @@
       return true;
     }
     if (msg.type === 'HIGHLIGHT') {
-      showOverlayAdvanced(msg.selector, msg.label || 'Try clicking this');
-      sendResponse({ ok: true });
+      const success = showOverlayAdvanced(msg.selector, msg.label || 'Try clicking this', { strictSelector: Boolean(msg.strictSelector) });
+      sendResponse({ ok: Boolean(success) });
+      return true;
+    }
+    if (msg.type === 'VALIDATE_SELECTOR') {
+      const el = resolveSelectorStrict(msg.selector);
+      sendResponse({ ok: Boolean(el) });
       return true;
     }
   });
 })();
+

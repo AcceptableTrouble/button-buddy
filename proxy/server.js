@@ -15,8 +15,13 @@ function buildPrompt(query, page, history) {
   const trimmed = {
     url: page.url,
     title: page.title,
+    lang: page.lang || null,
     elements: (page.elements || []).slice(0, 200).map(e => ({
-      role: e.role, text: e.text, ariaLabel: e.ariaLabel, selector: e.selector, bounding: e.bounding
+      role: e.role,
+      text: e.text,
+      ariaLabel: e.ariaLabel,
+      selector: e.selector,
+      bounding: e.bounding
     })),
     context: (page.context || []).slice(0, 40).map(e => ({ role: e.role, text: e.text }))
   };
@@ -25,16 +30,15 @@ function buildPrompt(query, page, history) {
   const system = {
     role: 'system',
     content:
-`You are a web navigation assistant. Suggest ONE best next click on the CURRENT page toward the user's goal.
+`You are Button Buddy, a cautious browser assistant. Choose exactly one actionable element from the provided page data to move the user toward their goal.
 
-Heuristics (very important):
-- Prefer direct matches to the goal in visible text or aria-labels (e.g., 'Password', 'Subscriptions', 'Invoices').
-- If direct match is missing, choose the most *specific* parent: Profile/Account/Settings before Menu/More.
-- For cancellation/billing: prefer Subscriptions/Billing/Plans over generic Menu.
-- For password/security: prefer Profile/Account/Settings/Security over Menu.
-- Be multilingual-aware (e.g., Norwegian): 
-  - account/konto, settings/innstillinger, profile/profil, billing/fakturering/betaling, subscription/abonnement, invoices/faktura, security/sikkerhet, password/passord, cancel/avslutt/si opp, unsubscribe/avmeld/oppheve.
-- If nothing relevant exists, choose the main entry (Menu) with low confidence.
+Rules you must follow:
+- Only pick from the given elements array; never fabricate new labels or selectors.
+- Output the element's exact selector. If multiple look relevant, prefer the most specific, visible option.
+- Use the element's visible text (or aria-label) verbatim for "action_label". Keep explanations in English but reference the real label even if the page uses another language.
+- Infer the page language from title, lang attribute, and visible text to disambiguate meanings.
+- If you are not fully confident, cap confidence at 0.55 and include a cautious explanation that clearly states the uncertainty (e.g., "Not fully certain; ...").
+- If nothing is a good fit, choose the closest helpful element with low confidence rather than inventing anything.
 
 STRICTLY reply with JSON ONLY:
 {"action_label": string, "selector": string|null, "confidence": number (0-1), "explanation": string (<=160 chars)}`
@@ -87,6 +91,20 @@ Current page summary:
     {
       role: 'assistant',
       content: `{"action_label":"Fakturering","selector":"#fakturering","confidence":0.92,"explanation":"Invoices live under Billing/Fakturering."}`
+    },
+    {
+      role: 'user',
+      content:
+`User goal: Cancel my subscription
+Prior steps: []
+Current page summary:
+{"url":"https://app.example.com","title":"Dashboard","lang":null,"elements":[
+  {"role":"link","text":"Menu","selector":"#menu"},
+  {"role":"link","text":"Plans","selector":"#plans"}]}`
+    },
+    {
+      role: 'assistant',
+      content: `{"action_label":"Plans","selector":"#plans","confidence":0.55,"explanation":"Not fully certain; Plans is the closest option for managing subscriptions."}`
     }
   ];
 
@@ -109,6 +127,11 @@ app.post('/ask', async (req, res) => {
   try {
     const { query, page, history } = req.body || {};
     if (!query || !page) return res.status(400).json({ error: 'Missing query or page' });
+
+    const allowedElements = (page.elements || [])
+      .slice(0, 200)
+      .filter(el => el && el.selector);
+    const selectorMap = new Map(allowedElements.map(el => [el.selector, el]));
 
     const messages = buildPrompt(query, page, history);
 
@@ -153,6 +176,28 @@ app.post('/ask', async (req, res) => {
       explanation: String(parsed.explanation || 'This seems relevant.')
     };
 
+    const chosen = out.selector ? selectorMap.get(out.selector) : null;
+    if (!chosen) {
+      out.selector = null;
+      out.confidence = Math.min(out.confidence, 0.45);
+      out.action_label = 'No validated element';
+      out.explanation = 'Model response did not match provided elements.';
+    } else {
+      const label = (chosen.text || chosen.ariaLabel || chosen.name || '').trim();
+      if (label) out.action_label = label;
+    }
+
+    if (out.confidence < 0 && Number.isFinite(out.confidence)) {
+      out.confidence = 0;
+    }
+
+    if (out.confidence > 1) out.confidence = 1;
+
+    // Keep explanations concise to avoid UI overflow.
+    if (out.explanation.length > 160) {
+      out.explanation = out.explanation.slice(0, 157) + '...';
+    }
+
     res.json(out);
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -162,3 +207,4 @@ app.post('/ask', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Proxy running on http://localhost:${PORT}`);
 });
+
