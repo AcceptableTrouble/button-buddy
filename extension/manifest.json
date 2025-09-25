@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Button Buddy",
+  "version": "0.1.0",
+  "description": "Highlights the next likely UI control to achieve your goal.",
+  "action": {
+    "default_title": "Button Buddy",
+    "default_popup": "popup.html"
+  },
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}
+
+

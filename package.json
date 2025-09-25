@@ -1,0 +1,23 @@
+{
+  "name": "button-buddy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:server": "nodemon server/index.js",
+    "start:server": "node server/index.js",
+    "dev:ext": "chokidar 'extension/**/*' -c 'echo \"[button-buddy] Extension files changed. Reload in chrome://extensions (Cmd+R).\"'"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "openai": "^4.55.0"
+  },
+  "devDependencies": {
+    "chokidar-cli": "^3.0.0",
+    "nodemon": "^3.1.0"
+  }
+}
+
+

@@ -1,0 +1,5 @@
+/* Minimal overlay styles (redundant since we inline critical styles in JS) */
+.bb-ring { box-sizing: border-box; }
+.bb-tooltip { user-select: none; }
+
+
