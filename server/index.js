@@ -83,7 +83,7 @@ app.post('/rank', async (req, res) => {
       }));
 
     // Build system prompt with site hints context if available
-    let systemPrompt = 'You are a careful UI action ranker. Given a user goal and a small list of interactable UI controls from a web page, choose the single best control that most directly progresses the goal. Prefer highly specific controls that immediately advance the task over generic navigation. Be conservative. Return JSON only.';
+    let systemPrompt = 'You are a careful UI action ranker. Given a user goal and a small list of interactable UI controls from a web page, choose the single best control that most directly progresses the goal. Prefer highly specific controls that immediately advance the task over generic navigation. Be conservative. Return JSON only.\n\nCONSTRAINT: Choose exactly one element from candidates. Prefer labels that include goal-relevant nouns (email, billing, subscription, subscriptions, users, password, security) over generic words (change, more, menu, help, docs). If only generics exist, choose the most specific path (settings/account/profile) and lower confidence.';
     
     let siteHintsContext = '';
     if (siteHints && Array.isArray(siteHints.hints) && siteHints.hints.length > 0) {
@@ -97,7 +97,7 @@ app.post('/rank', async (req, res) => {
     const user = {
       goal,
       instructions:
-        'Select ONE best candidate. Consider accessible name, role/type, nearby/ancestor text, and hints. If confidence is low, reflect that in confidence score. Avoid generic links unless they clearly lead to the desired area. Output as JSON.',
+        'Select ONE best candidate. Consider accessible name, role/type, nearby/ancestor text, and hints. If confidence is low, reflect that in confidence score. Avoid generic links unless they clearly lead to the desired area. Prefer goal-relevant nouns (email, billing, subscription, subscriptions, users, password, security) over generics (change, more, menu, help, docs). If only generics exist, pick the most specific path (settings/account/profile) and lower confidence. Output as JSON.',
       candidates: compact,
       output_schema: {
         elementId: 'string',
@@ -128,7 +128,7 @@ app.post('/rank', async (req, res) => {
     try {
       const llmCall = openai.chat.completions.create({
         model: 'gpt-4o-mini',
-        temperature: 0.2,
+        temperature: 0.15,
         messages,
       });
       const timeout = new Promise((_, reject) => {
