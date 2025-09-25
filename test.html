@@ -1,9 +1,35 @@
 <!doctype html>
-<main>
-  <h1>Account Settings</h1>
-  <section aria-label="Security">
-    <h2>Security</h2>
-    <a href="/account/security">Password</a>
-    <button id="change-pass">Change password</button>
-  </section>
-</main>
+<html>
+<head>
+  <title>Test Site - Account Management</title>
+</head>
+<body>
+  <nav>
+    <a href="/settings">Settings</a>
+    <a href="/account">Account</a>
+    <a href="/billing">Billing</a>
+    <a href="/security">Security</a>
+  </nav>
+  
+  <main>
+    <h1>Account Settings</h1>
+    <section aria-label="Security">
+      <h2>Security</h2>
+      <a href="/account/security">Password</a>
+      <button id="change-pass">Change password</button>
+      <button id="change-email">Change email</button>
+    </section>
+    
+    <section aria-label="Billing">
+      <h2>Billing</h2>
+      <a href="/billing/subscription">Subscription</a>
+      <button id="cancel-sub">Cancel subscription</button>
+    </section>
+  </main>
+  
+  <footer>
+    <a href="/users">User Management</a>
+    <a href="/admin">Admin Panel</a>
+  </footer>
+</body>
+</html>

@@ -421,12 +421,68 @@
     overlay = null;
   }
 
-  async function rankWithServer(goal, topCandidates) {
+  // Site hints integration
+  function getSiteHintsKey(origin, goal) {
+    return `__bb_site_hints_${origin}_${goal.toLowerCase()}`;
+  }
+
+  function getCachedSiteHints(origin, goal) {
     try {
+      const key = getSiteHintsKey(origin, goal);
+      const cached = localStorage.getItem(key);
+      if (cached) {
+        const data = JSON.parse(cached);
+        // Check if cache is still valid (30 minutes)
+        if (Date.now() - data.timestamp < 30 * 60 * 1000) {
+          return data.hints;
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to get cached site hints:', e);
+    }
+    return null;
+  }
+
+  function cacheSiteHints(origin, goal, hints) {
+    try {
+      const key = getSiteHintsKey(origin, goal);
+      const data = {
+        hints,
+        timestamp: Date.now()
+      };
+      localStorage.setItem(key, JSON.stringify(data));
+    } catch (e) {
+      console.warn('Failed to cache site hints:', e);
+    }
+  }
+
+  async function fetchSiteHints(origin, goal) {
+    try {
+      const resp = await fetch(`${SERVER_URL}/site-hints`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ origin, goal })
+      });
+      if (!resp.ok) throw new Error('Bad response');
+      const data = await resp.json();
+      return data.hints || [];
+    } catch (e) {
+      console.warn('Failed to fetch site hints:', e);
+      return [];
+    }
+  }
+
+  async function rankWithServer(goal, topCandidates, siteHints = null) {
+    try {
+      const requestBody = { goal, candidates: topCandidates };
+      if (siteHints && siteHints.length > 0) {
+        requestBody.siteHints = { hints: siteHints };
+      }
+      
       const resp = await fetch(`${SERVER_URL}/rank`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ goal, candidates: topCandidates })
+        body: JSON.stringify(requestBody)
       });
       if (!resp.ok) throw new Error('Bad response');
       return await resp.json();
@@ -462,6 +518,27 @@
       hideOverlay();
       return;
     }
+    
+    // Get site hints for the current origin and goal
+    const origin = window.location.origin;
+    let siteHints = getCachedSiteHints(origin, goal);
+    
+    // If no cached hints and this is a new goal, fetch them asynchronously
+    if (!siteHints && trigger === 'user') {
+      // Fetch site hints in parallel with ranking (non-blocking)
+      fetchSiteHints(origin, goal).then(hints => {
+        if (hints && hints.length > 0) {
+          cacheSiteHints(origin, goal, hints);
+          // Re-run ranking with fresh hints if we're still on the same goal
+          if (currentGoal === goal) {
+            reRankSoon('site_hints_updated');
+          }
+        }
+      }).catch(e => {
+        console.warn('Site hints fetch failed:', e);
+      });
+    }
+    
     const { top, bestLocal, bestLocalScore } = preRank(goal, candidates);
     // If very strong local score, show immediately with provisional confidence
     let provisional = null;
@@ -473,8 +550,8 @@
       const tip = `${sourceLabel} • ${Math.round(provisional.confidence || 0)}% — ${provisional.reason || ''}`;
       showOverlayFor(bestLocal, tip);
     }
-    // Ask server for final ranking
-    const ranked = await rankWithServer(goal, top);
+    // Ask server for final ranking with site hints
+    const ranked = await rankWithServer(goal, top, siteHints);
     if (!ranked) {
       if (!provisional) {
         const msg = { bounds: { x: 10, y: 10, w: 0, h: 0 } };
