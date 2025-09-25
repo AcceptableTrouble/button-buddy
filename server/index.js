@@ -16,6 +16,75 @@ app.use(express.json({ limit: '2mb' }));
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const LLM_TIMEOUT_MS = 8000;
 
+// /rank in-memory cache (60s TTL, max 500, simple LRU via Map insertion order)
+const RANK_CACHE_TTL_MS = 60 * 1000;
+const RANK_CACHE_MAX_ENTRIES = 500;
+const rankCache = new Map(); // key -> { timestamp:number, data:object }
+
+function normalizeToken(s) {
+  return (s || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .trim();
+}
+
+function tinyHash(str) {
+  // FNV-1a 32-bit
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  // return short base36 string
+  return h.toString(36);
+}
+
+function buildPageSignatureFromCandidates(compactCandidates) {
+  // Use top 30-50 tokens from accName/text/labels/role/tag
+  const tokens = [];
+  for (const c of compactCandidates.slice(0, 50)) {
+    if (c.accName) tokens.push(normalizeToken(c.accName));
+    if (c.text) tokens.push(normalizeToken(c.text));
+    if (Array.isArray(c.labels)) {
+      for (const l of c.labels) tokens.push(normalizeToken(l));
+    }
+    if (c.role) tokens.push(normalizeToken(c.role));
+    if (c.tag) tokens.push(normalizeToken(c.tag));
+  }
+  const deduped = Array.from(new Set(tokens.filter(Boolean))).slice(0, 50);
+  return tinyHash(deduped.join('|'));
+}
+
+function getRankCache(key) {
+  const ent = rankCache.get(key);
+  if (!ent) return null;
+  if (Date.now() - ent.timestamp > RANK_CACHE_TTL_MS) {
+    rankCache.delete(key);
+    return null;
+  }
+  // refresh LRU order
+  rankCache.delete(key);
+  rankCache.set(key, ent);
+  return ent.data;
+}
+
+function setRankCache(key, data) {
+  rankCache.set(key, { timestamp: Date.now(), data });
+  // evict expired first
+  for (const [k, v] of rankCache.entries()) {
+    if (Date.now() - v.timestamp > RANK_CACHE_TTL_MS) {
+      rankCache.delete(k);
+    }
+  }
+  // enforce max entries (delete oldest)
+  while (rankCache.size > RANK_CACHE_MAX_ENTRIES) {
+    const oldestKey = rankCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    rankCache.delete(oldestKey);
+  }
+}
+
 // Site hints feature flag
 const ENABLE_SITE_HINTS = process.env.ENABLE_SITE_HINTS !== 'false';
 
@@ -81,6 +150,14 @@ app.post('/rank', async (req, res) => {
         ancestorTextSample: c.ancestorTextSample,
         confidenceHints: c.confidenceHints,
       }));
+
+    // Build cache key from goal + compact page signature (no raw HTML stored)
+    const pageSignature = buildPageSignatureFromCandidates(compact);
+    const cacheKey = `${goal.toLowerCase().trim()}|${pageSignature}`;
+    const cached = getRankCache(cacheKey);
+    if (cached) {
+      return res.json({ ...cached, cache_hit: true });
+    }
 
     // Build system prompt with site hints context if available
     let systemPrompt = 'You are a careful UI action ranker. Given a user goal and a small list of interactable UI controls from a web page, choose the single best control that most directly progresses the goal. Prefer highly specific controls that immediately advance the task over generic navigation. Be conservative. Return JSON only.\n\nCONSTRAINT: Choose exactly one element from candidates. Prefer labels that include goal-relevant nouns (email, billing, subscription, subscriptions, users, password, security) over generic words (change, more, menu, help, docs). If only generics exist, choose the most specific path (settings/account/profile) and lower confidence.';
@@ -156,13 +233,15 @@ app.post('/rank', async (req, res) => {
           (c.text || '') + ' ' + (c.accName || '') + ' ' + (c.ariaLabel || '')
         )) || compact[0];
 
-        return res.json({
+        const fallback = {
           elementId: pick?.id || null,
           reason: 'Timed out; offering best local guess',
           confidence: 35,
           alternates: undefined,
           llm_ms,
-        });
+        };
+        setRankCache(cacheKey, fallback);
+        return res.json({ ...fallback, cache_hit: false });
       }
 
       console.error('LLM call error:', e);
@@ -190,7 +269,9 @@ app.post('/rank', async (req, res) => {
       alternates: Array.isArray(parsed.alternates) ? parsed.alternates.slice(0, 3) : undefined,
     };
 
-    res.json({ ...result, llm_ms });
+    const payload = { ...result, llm_ms };
+    setRankCache(cacheKey, payload);
+    res.json({ ...payload, cache_hit: false });
   } catch (err) {
     console.error('Rank error:', err);
     res.status(500).json({ error: 'Internal error' });
