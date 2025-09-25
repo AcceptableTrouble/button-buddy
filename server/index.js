@@ -1,4 +1,5 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
+dotenv.config({ path: new URL('./.env', import.meta.url).pathname });
 import express from 'express';
 import cors from 'cors';
 import { OpenAI } from 'openai';
@@ -10,6 +11,7 @@ app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const LLM_TIMEOUT_MS = 8000;
 
 app.get('/', (_req, res) => {
   res.json({ ok: true, service: 'button-buddy', endpoints: ['/rank'] });
@@ -71,28 +73,71 @@ app.post('/rank', async (req, res) => {
           goal +
           '\nCANDIDATES (JSON):\n' +
           JSON.stringify(compact).slice(0, 120000) +
-          '\nRespond ONLY with a compact JSON object: {"elementId":"...","reason":"...","confidence":0-100,"alternates":["..."]?}',
+          '\nIMPORTANT: You must choose an elementId strictly from the provided candidates (by id). Do not invent or transform ids.\nRespond ONLY with a compact JSON object: {"elementId":"...","reason":"...","confidence":0-100,"alternates":["..."]?}',
       },
     ];
 
-    const response = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      temperature: 0.2,
-      messages,
-    });
+    // call LLM with a hard timeout and capture timing (Promise.race, no SDK signal)
+    const started = Date.now();
+    let timer;
+    let llmText = '';
+    let llm_ms = 0;
+    try {
+      const llmCall = openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        temperature: 0.2,
+        messages,
+      });
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('LLM_TIMEOUT')), LLM_TIMEOUT_MS);
+      });
 
-    const text = response.choices?.[0]?.message?.content?.trim() || '';
+      const resp = await Promise.race([llmCall, timeout]);
+      clearTimeout(timer);
+      llm_ms = Date.now() - started;
+
+      // If we got a real response object, extract text
+      if (resp && resp.choices) {
+        llmText = resp.choices?.[0]?.message?.content?.trim() || '';
+      } else {
+        // Defensive: if Promise.race resolved with something unexpected
+        throw new Error('LLM_TIMEOUT');
+      }
+    } catch (e) {
+      llm_ms = Date.now() - started;
+      clearTimeout(timer);
+
+      if (e && e.message === 'LLM_TIMEOUT') {
+        // Soft fallback guess from compact candidates when the LLM times out
+        const pick = compact.find(c => /email|subscription|billing|settings|account|password/i.test(
+          (c.text || '') + ' ' + (c.accName || '') + ' ' + (c.ariaLabel || '')
+        )) || compact[0];
+
+        return res.json({
+          elementId: pick?.id || null,
+          reason: 'Timed out; offering best local guess',
+          confidence: 35,
+          alternates: undefined,
+          llm_ms,
+        });
+      }
+
+      console.error('LLM call error:', e);
+      return res.status(502).json({ error: 'LLM error', detail: String(e), llm_ms });
+    }
+
+    // parse LLM output (try robustly)
+    const text = llmText;
     let parsed;
     try {
       parsed = JSON.parse(text);
     } catch (_e) {
-      // Try to extract JSON via a naive match
       const match = text.match(/\{[\s\S]*\}/);
       parsed = match ? JSON.parse(match[0]) : null;
     }
 
     if (!parsed || !parsed.elementId) {
-      return res.status(502).json({ error: 'Bad LLM response', raw: text });
+      return res.status(502).json({ error: 'Bad LLM response', raw: text, llm_ms });
     }
 
     const result = {
@@ -102,7 +147,7 @@ app.post('/rank', async (req, res) => {
       alternates: Array.isArray(parsed.alternates) ? parsed.alternates.slice(0, 3) : undefined,
     };
 
-    res.json(result);
+    res.json({ ...result, llm_ms });
   } catch (err) {
     console.error('Rank error:', err);
     res.status(500).json({ error: 'Internal error' });

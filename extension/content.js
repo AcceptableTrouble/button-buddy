@@ -1,6 +1,19 @@
 /* Button Buddy content script */
 (() => {
-  const SERVER_URL = localStorage.getItem('__bb_server_url') || 'http://localhost:3000';
+  // Resolve server URL with flexible overrides for easier dev/testing:
+  // 1) localStorage '__bb_server_url'
+  // 2) window.__BB_SERVER_URL (settable via console or injected script)
+  // 3) default to localhost:8787 (server default)
+  const SERVER_URL = (() => {
+    try {
+      const fromLS = localStorage.getItem('__bb_server_url');
+      if (fromLS && /^https?:\/\//.test(fromLS)) return fromLS;
+    } catch (_) {}
+    if (typeof window !== 'undefined' && window.__BB_SERVER_URL && /^https?:\/\//.test(window.__BB_SERVER_URL)) {
+      return window.__BB_SERVER_URL;
+    }
+    return 'http://localhost:8787';
+  })();
 
   let currentGoal = '';
   let lastResult = null;
