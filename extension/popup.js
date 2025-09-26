@@ -21,6 +21,8 @@ findBtn.addEventListener('click', async () => {
   try {
     await sendGoalToActiveTab(goal);
     msg.textContent = '';
+    // Close the popup after dispatching the request; status will be shown in-page
+    window.close();
   } catch (e) {
     msg.textContent = 'Could not reach this page. Try reloading it.';
   }

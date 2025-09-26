@@ -421,6 +421,64 @@
     overlay = null;
   }
 
+  // New: persistent bottom-left status panel
+  let statusPanel = null;
+  let statusTitleEl = null;
+  let statusTextEl = null;
+
+  function ensureStatusPanel() {
+    if (statusPanel) return statusPanel;
+    statusPanel = document.createElement('div');
+    statusPanel.id = '__bb_status_panel';
+    statusPanel.style.position = 'fixed';
+    statusPanel.style.left = '16px';
+    statusPanel.style.bottom = '16px';
+    statusPanel.style.zIndex = '2147483647';
+    statusPanel.style.pointerEvents = 'auto';
+    statusPanel.style.background = 'rgba(17,25,40,0.92)';
+    statusPanel.style.color = '#fff';
+    statusPanel.style.padding = '11px 14px';
+    statusPanel.style.borderRadius = '10px';
+    statusPanel.style.font = '14px/22px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
+    statusPanel.style.boxShadow = '0 7px 24px rgba(0,0,0,0.28)';
+    statusPanel.style.userSelect = 'none';
+    statusPanel.style.minWidth = '216px';
+    statusPanel.style.textAlign = 'left';
+    // Build panel content: title + status text
+    statusTitleEl = document.createElement('div');
+    statusTitleEl.id = '__bb_status_title';
+    statusTitleEl.textContent = '';
+    statusTitleEl.style.font = '18px/24px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
+    statusTitleEl.style.fontWeight = '600';
+    statusTitleEl.style.marginBottom = '6px';
+    statusTitleEl.style.color = '#fff';
+    statusTitleEl.style.wordBreak = 'break-word';
+
+    statusTextEl = document.createElement('div');
+    statusTextEl.id = '__bb_status_text';
+    statusTextEl.textContent = 'Ready';
+    statusTextEl.style.color = '#D6E1FF';
+
+    statusPanel.appendChild(statusTitleEl);
+    statusPanel.appendChild(statusTextEl);
+    document.documentElement.appendChild(statusPanel);
+    return statusPanel;
+  }
+
+  function setStatus(text) {
+    try {
+      ensureStatusPanel();
+      if (statusTextEl) statusTextEl.textContent = text || '';
+    } catch (_) {}
+  }
+
+  function setStatusTitle(text) {
+    try {
+      ensureStatusPanel();
+      if (statusTitleEl) statusTitleEl.textContent = text || '';
+    } catch (_) {}
+  }
+
   // Site hints integration
   function getSiteHintsKey(origin, goal) {
     return `__bb_site_hints_${origin}_${goal.toLowerCase()}`;
@@ -513,9 +571,13 @@
   }
 
   async function runFlow(goal, trigger) {
+    ensureStatusPanel();
+    setStatusTitle(goal || '');
+    setStatus('Scanning…');
     const candidates = collectCandidates();
     if (candidates.length === 0) {
       hideOverlay();
+      setStatus('No actionable elements found');
       return;
     }
     
@@ -549,13 +611,16 @@
       const sourceLabel = provisional.source === 'local' ? 'Local match' : (provisional.source === 'llm' ? 'LLM rank' : 'Match');
       const tip = `${sourceLabel} • ${Math.round(provisional.confidence || 0)}% — ${provisional.reason || ''}`;
       showOverlayFor(bestLocal, tip);
+      setStatus(`${Math.round(provisional.confidence || 0)}% certain`);
     }
     // Ask server for final ranking with site hints
+    setStatus('Thinking…');
     const ranked = await rankWithServer(goal, top, siteHints);
     if (!ranked) {
       if (!provisional) {
         const msg = { bounds: { x: 10, y: 10, w: 0, h: 0 } };
         showOverlayFor(msg, 'No good match yet; try rephrasing or navigate closer', 0);
+        setStatus('No good match');
       }
       return;
     }
@@ -571,6 +636,7 @@
     const sourceLabel = lastResult.source === 'local' ? 'Local match' : (lastResult.source === 'llm' ? 'LLM rank' : 'Match');
     const tip = `${sourceLabel} • ${Math.round(lastResult.confidence || 0)}% — ${lastResult.reason || ''}`;
     showOverlayFor(chosen, tip);
+    setStatus(`${Math.round(lastResult.confidence || 0)}% certain`);
     attachCompletionDetectors(document.querySelector(`[${BB_UID_ATTR}="${chosen.id}"]`) || document.body);
   }
 
